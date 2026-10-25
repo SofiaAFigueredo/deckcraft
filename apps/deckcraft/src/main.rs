@@ -430,4 +430,18 @@ mod tests {
         assert_eq!(mac, win, "macOS and Windows offer different file types");
         assert_eq!(mac, linux, "macOS and Linux offer different file types");
     }
+
+    /// #1114: a shortcut that names an MSI `<Icon>` shows a blank icon once an update deletes the
+    /// cached copy of it, and a taskbar pin (a copy of the shortcut) is never repaired. Shortcuts
+    /// take the icon embedded in `deckcraft.exe`; only `ARPPRODUCTICON` uses the MSI `<Icon>`.
+    #[test]
+    fn windows_shortcuts_use_the_icon_embedded_in_the_exe() {
+        let wxs = include_str!("../../../packaging/windows/deckcraft.wxs");
+        let shortcuts: Vec<&str> = wxs.split("<Shortcut").skip(1).filter_map(|s| s.split("/>").next()).collect();
+        assert!(!shortcuts.is_empty(), "deckcraft.wxs has no shortcut");
+        for shortcut in shortcuts {
+            assert!(!shortcut.contains("Icon="), "a shortcut names an MSI <Icon>:{shortcut}");
+        }
+        assert!(wxs.contains("<Property Id=\"ARPPRODUCTICON\""), "Apps and features keeps its icon");
+    }
 }
