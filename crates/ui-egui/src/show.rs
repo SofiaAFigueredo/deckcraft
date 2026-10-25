@@ -271,15 +271,16 @@ struct Transition {
     /// moves contents over backgrounds (Pan, Ferris Wheel, Reveal…): old back, old content, new
     /// back, new content.
     parts: Option<[Option<TextureHandle>; 4]>,
-    /// When the transition's clock started. `apply` sets it to the time of the key press; the
-    /// first frames of the transition re-anchor it (see `progress`), because rendering the new
-    /// slide and the transition's pictures can take longer than the whole transition (#1385).
+    /// The time of the key press. A hidden show, which draws nothing, expires the transition
+    /// from it.
     start: f64,
+    /// Where the drawn transition's clock starts: the frame after the first one (see `progress`),
+    /// because rendering the new slide and the transition's pictures can take longer than the
+    /// whole transition (#1385). `None` until then.
+    clock: Option<f64>,
     /// The first frame of the transition has been drawn: the new slide and the pictures the
     /// transition needs exist, so the time they took is not part of the transition.
     primed: bool,
-    /// `start` was moved to the frame after the first one.
-    anchored: bool,
     kind: String,
     option: String,
     dur: f64,
@@ -294,11 +295,8 @@ impl Transition {
             self.primed = true;
             return 0.0;
         }
-        if !self.anchored {
-            self.anchored = true;
-            self.start = now;
-        }
-        ((now - self.start) / self.dur.max(0.01)).clamp(0.0, 1.0)
+        let clock = *self.clock.get_or_insert(now);
+        ((now - clock) / self.dur.max(0.01)).clamp(0.0, 1.0)
     }
 }
 
@@ -608,7 +606,7 @@ impl Show {
                     self.last_viewed = from;
                 }
                 self.trans = if kind != "none" && dur > 0.0 && !doc.show.without_animation {
-                    Some(Transition { old, from, morph: None, parts: None, start: now, primed: false, anchored: false, kind, option, dur })
+                    Some(Transition { old, from, morph: None, parts: None, start: now, clock: None, primed: false, kind, option, dur })
                 } else {
                     None
                 };
@@ -2840,6 +2838,8 @@ mod tests {
         assert!((tr.progress(12.25) - 0.5).abs() < 1e-9);
         assert_eq!(tr.progress(12.5), 1.0);
         assert_eq!(tr.progress(20.0), 1.0);
+        // A hidden show still expires it from the key press.
+        assert_eq!(tr.start, 10.0);
     }
 
     #[test]
