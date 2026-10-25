@@ -271,10 +271,35 @@ struct Transition {
     /// moves contents over backgrounds (Pan, Ferris Wheel, Reveal…): old back, old content, new
     /// back, new content.
     parts: Option<[Option<TextureHandle>; 4]>,
+    /// When the transition's clock started. `apply` sets it to the time of the key press; the
+    /// first frames of the transition re-anchor it (see `progress`), because rendering the new
+    /// slide and the transition's pictures can take longer than the whole transition (#1385).
     start: f64,
+    /// The first frame of the transition has been drawn: the new slide and the pictures the
+    /// transition needs exist, so the time they took is not part of the transition.
+    primed: bool,
+    /// `start` was moved to the frame after the first one.
+    anchored: bool,
     kind: String,
     option: String,
     dur: f64,
+}
+
+impl Transition {
+    /// How far the transition has come at frame time `now`, from 0 to 1. The first frame is the
+    /// one that renders the new slide and the transition's pictures and the second one starts the
+    /// clock, so a slow render never eats the transition's duration (#1385).
+    fn progress(&mut self, now: f64) -> f64 {
+        if !self.primed {
+            self.primed = true;
+            return 0.0;
+        }
+        if !self.anchored {
+            self.anchored = true;
+            self.start = now;
+        }
+        ((now - self.start) / self.dur.max(0.01)).clamp(0.0, 1.0)
+    }
 }
 
 /// A copy of the show's clock origins for regressions that must not depend on wall time.
@@ -583,7 +608,7 @@ impl Show {
                     self.last_viewed = from;
                 }
                 self.trans = if kind != "none" && dur > 0.0 && !doc.show.without_animation {
-                    Some(Transition { old, from, morph: None, parts: None, start: now, kind, option, dur })
+                    Some(Transition { old, from, morph: None, parts: None, start: now, primed: false, anchored: false, kind, option, dur })
                 } else {
                     None
                 };
@@ -1091,11 +1116,12 @@ pub fn ui(app: &mut SlideApp, ui: &mut Ui) {
             }
         }
         let mut drew = false;
-        let morphing = show.trans.as_ref().is_some_and(|tr| tr.kind == "morph" && tr.from.is_some() && now - tr.start < tr.dur);
+        let progress = show.trans.as_mut().map(|tr| tr.progress(now));
+        let morphing = show.trans.as_ref().is_some_and(|tr| tr.kind == "morph" && tr.from.is_some()) && progress.is_some_and(|p| p < 1.0);
         let tl = if morphing { Some(show.timeline(&doc).clone()) } else { None };
         let morph = match (&show.trans, tl) {
             (Some(tr), Some(tl)) => {
-                let p = ((now - tr.start) / tr.dur.max(0.01)).clamp(0.0, 1.0);
+                let p = progress.unwrap_or(1.0);
                 let hidden_b = |id: ShapeId| {
                     let st = state_for(&tl, id, 0, 0.0, &[], &[]);
                     !st.visible || st.opacity <= 0.0 || hidden.contains(&id)
@@ -1137,7 +1163,7 @@ pub fn ui(app: &mut SlideApp, ui: &mut Ui) {
             drew = true;
             ctx.request_repaint();
         } else if let (Some(tr), Some(new)) = (show.trans.as_mut(), &tex) {
-            let p = ((now - tr.start) / tr.dur.max(0.01)).clamp(0.0, 1.0);
+            let p = progress.unwrap_or(1.0);
             if p < 1.0 {
                 // Slides split into background and content are rendered once per transition;
                 // every frame only composites cached textures.
@@ -2793,6 +2819,27 @@ mod tests {
         assert_eq!(tr.old.as_ref().map(TextureHandle::id), Some(red.id()));
         assert_eq!(tr.from, Some(0));
         assert!(show.tex.is_none(), "the new slide gets a texture of its own instead of overwriting the old one");
+    }
+
+    #[test]
+    fn a_slow_first_frame_does_not_use_up_the_transition() {
+        // #1385: the clock started at the key press, so rendering the new slide for longer than the
+        // transition's duration showed the next slide with no transition at all.
+        let mut s = deckcraft_engine::Session::with_new();
+        s.execute("slide.new", &json!({})).unwrap();
+        s.execute("transition.set", &json!({"kind": "fade", "index": 1, "duration": 500})).unwrap();
+        let doc = s.active().unwrap().doc.clone();
+        let mut show = Show::new(&doc, 0, false, false);
+        assert!(show.apply(ShowAction::Slide(1), &doc, 10.0));
+        let tr = show.trans.as_mut().expect("the fade plays");
+        assert!((tr.dur - 0.5).abs() < 1e-9);
+        // The first frame renders for two seconds; it still shows the start of the transition.
+        assert_eq!(tr.progress(10.0), 0.0);
+        // The frame after it starts the clock.
+        assert_eq!(tr.progress(12.0), 0.0);
+        assert!((tr.progress(12.25) - 0.5).abs() < 1e-9);
+        assert_eq!(tr.progress(12.5), 1.0);
+        assert_eq!(tr.progress(20.0), 1.0);
     }
 
     #[test]
