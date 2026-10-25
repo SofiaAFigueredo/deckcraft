@@ -63,9 +63,10 @@
                update is a major upgrade with a new ProductCode that deletes the old folder. A
                taskbar pin is a copy of this shortcut that the update never touches, so it kept
                pointing at the deleted file and lost its icon (#1114). The exe's path survives
-               updates. The Icon above stays for ARPPRODUCTICON (Apps and features). -->
+               updates; the shortcut is not advertised, so it targets that path and its icon is the
+               exe's own. The Icon above stays for ARPPRODUCTICON (Apps and features). -->
           <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="DeckCraft"
-              Description="DeckCraft presentations and slide shows" WorkingDirectory="INSTALLFOLDER" Advertise="yes" />
+              Description="DeckCraft presentations and slide shows" WorkingDirectory="INSTALLFOLDER" Advertise="no" />
         </File>
 
         <!-- .deckcraft: DeckCraft's own format. -->
