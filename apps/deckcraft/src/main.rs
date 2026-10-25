@@ -444,4 +444,13 @@ mod tests {
         }
         assert!(wxs.contains("<Property Id=\"ARPPRODUCTICON\""), "Apps and features keeps its icon");
     }
+
+    /// The shortcuts take the exe's own icon, and `package.ps1 -SkipBuild` packages an existing
+    /// exe without `DECKCRAFT_REQUIRE_WINRES`, so the script has to refuse one with no icon.
+    #[test]
+    fn the_windows_package_script_rejects_an_exe_without_an_icon() {
+        let script = include_str!("../../../packaging/windows/package.ps1");
+        assert!(script.contains("ExtractIconEx"), "package.ps1 does not count the exe's icons");
+        assert!(script.contains("has no embedded icon"), "package.ps1 does not reject an iconless exe");
+    }
 }
