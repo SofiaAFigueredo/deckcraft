@@ -262,11 +262,75 @@ fn start_prefetch(doc: &std::sync::Arc<Presentation>, next: usize, size: (u32, u
     spawned.ok().map(|_| Prefetch { key, rx })
 }
 
+/// Draw Morph frame `m` (from slide `from` to slide `to`) into the transition's texture. A frame
+/// that differs from the last one only where a few plain shapes moved is drawn and uploaded for
+/// that region alone; anything else redraws the whole frame.
+fn draw_morph_frame(
+    ctx: &egui::Context,
+    doc: &Presentation,
+    (from, to): (usize, usize),
+    m: deckcraft_anim::MorphFrame,
+    size: (u32, u32),
+    tr: &mut Transition,
+) {
+    let f = |id: ShapeId| ShapeState { opacity: m.opacity_of(id), ..Default::default() };
+    let opts = RenderOpts {
+        scale: size.0 as f64 / doc.slide_size.width.max(1.0),
+        size: Some(size),
+        state: Some(&f),
+        threads: render_threads(),
+        ..Default::default()
+    };
+    let text: Vec<deckcraft_render::TextMorph> =
+        m.text.iter().map(|x| deckcraft_render::TextMorph { old: x.old, new: x.new, from: x.from, to: x.to, chars: x.chars, t: m.mix }).collect();
+    let paths: Vec<deckcraft_render::PathMorph> = m
+        .paths
+        .iter()
+        .map(|x| deckcraft_render::PathMorph { id: x.id, from: x.from.clone(), from_box: x.from_box, to_box: x.to_box, t: m.mix })
+        .collect();
+    // A shadow, glow or soft edge reaches into a block from a shape that did not change, and a
+    // block drawn alone has not got that shape's pixels to blur: such slides draw whole frames.
+    let filtered =
+        *tr.filtered.get_or_insert_with(|| [from, to].iter().any(|i| doc.slides.get(*i).is_some_and(|s| deckcraft_render::needs_filters(doc, s))));
+    let change = match (&tr.morph, &tr.last_morph) {
+        (Some(_), Some((last, last_size))) if *last_size == size && !filtered => m.changed_since(last),
+        _ => deckcraft_anim::MorphChange::Everything,
+    };
+    // Some(None): nothing to draw; Some(Some(block)): draw that block; None: the whole frame.
+    let part = match change {
+        deckcraft_anim::MorphChange::Nothing => Some(None),
+        deckcraft_anim::MorphChange::Region(r) => Some(deckcraft_render::pixel_region(r, opts.scale, size)),
+        deckcraft_anim::MorphChange::Everything => None,
+    };
+    match (part, tr.morph.as_mut()) {
+        (Some(None), Some(_)) => {}
+        (Some(Some(block)), Some(tex)) => {
+            let img = deckcraft_render::render_blend_part(doc, (from, to), m.mix, &m.shapes, &text, &paths, block, &opts);
+            let ci = crate::textures::to_color_image(&img, false);
+            tex.set_partial([block.0 as usize, block.1 as usize], ci, egui::TextureOptions::LINEAR);
+        }
+        _ => {
+            let img = deckcraft_render::render_blend(doc, from, to, m.mix, &m.shapes, &text, &paths, &opts);
+            let ci = crate::textures::to_color_image(&img, false);
+            match tr.morph.as_mut() {
+                Some(tex) => crate::textures::replace(ctx, tex, ci),
+                None => tr.morph = Some(crate::textures::upload(ctx, "morph", ci)),
+            }
+        }
+    }
+    tr.last_morph = Some((m, size));
+}
+
 struct Transition {
     old: Option<TextureHandle>,
     /// The slide left behind (Morph matches its shapes) and the Morph frame texture.
     from: Option<usize>,
     morph: Option<TextureHandle>,
+    /// The Morph frame drawn into `morph` last, and its size in pixels: the next frame draws only
+    /// what differs from it.
+    last_morph: Option<(deckcraft_anim::MorphFrame, (u32, u32))>,
+    /// Whether either slide of a Morph uses blur-based effects (decided on the first frame).
+    filtered: Option<bool>,
     /// Backgrounds and contents of the old and new slides, rendered once when the transition
     /// moves contents over backgrounds (Pan, Ferris Wheel, Reveal…): old back, old content, new
     /// back, new content.
@@ -583,7 +647,7 @@ impl Show {
                     self.last_viewed = from;
                 }
                 self.trans = if kind != "none" && dur > 0.0 && !doc.show.without_animation {
-                    Some(Transition { old, from, morph: None, parts: None, start: now, kind, option, dur })
+                    Some(Transition { old, from, morph: None, last_morph: None, filtered: None, parts: None, start: now, kind, option, dur })
                 } else {
                     None
                 };
@@ -1108,32 +1172,10 @@ pub fn ui(app: &mut SlideApp, ui: &mut Ui) {
             _ => None,
         };
         if let (Some((from, m)), Some(tr)) = (morph, show.trans.as_mut()) {
-            let f = |id: ShapeId| ShapeState { opacity: m.opacity_of(id), ..Default::default() };
-            let threads =
-                if cfg!(target_arch = "wasm32") { 0 } else { std::thread::available_parallelism().map(|n| n.get().min(8) as u16).unwrap_or(0) };
-            let opts =
-                RenderOpts { scale: size.0 as f64 / doc.slide_size.width.max(1.0), size: Some(size), state: Some(&f), threads, ..Default::default() };
-            let text: Vec<deckcraft_render::TextMorph> = m
-                .text
-                .iter()
-                .map(|x| deckcraft_render::TextMorph { old: x.old, new: x.new, from: x.from, to: x.to, chars: x.chars, t: m.mix })
-                .collect();
-            let paths: Vec<deckcraft_render::PathMorph> = m
-                .paths
-                .iter()
-                .map(|x| deckcraft_render::PathMorph { id: x.id, from: x.from.clone(), from_box: x.from_box, to_box: x.to_box, t: m.mix })
-                .collect();
-            let img = deckcraft_render::render_blend(&doc, from, idx, m.mix, &m.shapes, &text, &paths, &opts);
-            let ci = crate::textures::to_color_image(&img, false);
-            let frame = match tr.morph.take() {
-                Some(mut h) => {
-                    crate::textures::replace(&ctx, &mut h, ci);
-                    h
-                }
-                None => crate::textures::upload(&ctx, "morph", ci),
-            };
-            painter.image(frame.id(), srect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-            tr.morph = Some(frame);
+            draw_morph_frame(&ctx, &doc, (from, idx), m, size, tr);
+            if let Some(frame) = &tr.morph {
+                painter.image(frame.id(), srect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            }
             drew = true;
             ctx.request_repaint();
         } else if let (Some(tr), Some(new)) = (show.trans.as_mut(), &tex) {
@@ -2793,6 +2835,92 @@ mod tests {
         assert_eq!(tr.old.as_ref().map(TextureHandle::id), Some(red.id()));
         assert_eq!(tr.from, Some(0));
         assert!(show.tex.is_none(), "the new slide gets a texture of its own instead of overwriting the old one");
+    }
+
+    /// The pieces of the textures uploaded since the last call: where each lands (`None`: the whole
+    /// texture) and its size.
+    fn uploads(ctx: &egui::Context) -> Vec<(Option<[usize; 2]>, [usize; 2])> {
+        let mut delta = ctx.tex_manager().write().take_delta();
+        // A texture is first allocated empty, then set.
+        let sizes = delta.set.values().flatten().map(|d| (d.pos, d.image.size())).filter(|(_, size)| *size != [0, 0]).collect();
+        delta.clear();
+        sizes
+    }
+
+    /// Two slides with a box that moves across the slide, `still` shapes on both, and a Morph
+    /// transition state at its start.
+    fn morph_fixture(still: Vec<deckcraft_model::Shape>) -> (deckcraft_model::Presentation, Transition) {
+        let mut doc = deckcraft_model::Presentation::default();
+        let boxed = |x: f64| deckcraft_model::Shape {
+            id: ShapeId(10),
+            name: "Box".into(),
+            xfrm: Some(deckcraft_model::Xfrm::new(x, 100.0, 120.0, 80.0)),
+            ..Default::default()
+        };
+        std::sync::Arc::make_mut(&mut doc.slides[0]).shapes = [vec![boxed(40.0)], still.clone()].concat();
+        let mut next = (*doc.slides[0]).clone();
+        next.shapes = [vec![boxed(700.0)], still].concat();
+        doc.slides.push(std::sync::Arc::new(next));
+        let tr = Transition {
+            old: None,
+            from: Some(0),
+            morph: None,
+            last_morph: None,
+            filtered: None,
+            parts: None,
+            start: 0.0,
+            kind: "morph".into(),
+            option: "objects".into(),
+            dur: 1.0,
+        };
+        (doc, tr)
+    }
+
+    fn morph_frame_at(doc: &deckcraft_model::Presentation, t: f64) -> deckcraft_anim::MorphFrame {
+        deckcraft_anim::morph_frame(doc, &doc.slides[0], &doc.slides[1], t, &|_| false)
+    }
+
+    #[test]
+    fn a_morph_frame_draws_and_uploads_only_what_changed() {
+        // A box moving across the slide is a small part of every frame (the show used to draw and
+        // upload the whole picture for each).
+        let (doc, mut tr) = morph_fixture(vec![]);
+        let ctx = egui::Context::default();
+        let full = 960 * 540;
+        let area = |u: &[(Option<[usize; 2]>, [usize; 2])]| u.iter().map(|(_, [w, h])| w * h).sum::<usize>();
+        // The first frame is drawn whole.
+        draw_morph_frame(&ctx, &doc, (0, 1), morph_frame_at(&doc, 0.2), (960, 540), &mut tr);
+        assert_eq!(uploads(&ctx), [(None, [960, 540])]);
+        // The next one only where the box was and where it is.
+        draw_morph_frame(&ctx, &doc, (0, 1), morph_frame_at(&doc, 0.3), (960, 540), &mut tr);
+        let patch = uploads(&ctx);
+        assert!(matches!(patch.as_slice(), [(Some(_), _)]), "{patch:?}");
+        assert!(area(&patch) * 5 < full, "{patch:?}");
+        // The same frame again changes nothing.
+        draw_morph_frame(&ctx, &doc, (0, 1), morph_frame_at(&doc, 0.3), (960, 540), &mut tr);
+        assert!(uploads(&ctx).is_empty());
+        // A window that changed size starts over.
+        draw_morph_frame(&ctx, &doc, (0, 1), morph_frame_at(&doc, 0.4), (480, 270), &mut tr);
+        assert_eq!(uploads(&ctx), [(None, [480, 270])]);
+    }
+
+    #[test]
+    fn a_morph_over_a_blurred_effect_draws_whole_frames() {
+        // A soft-edged shape that does not move still blurs into the block the box moves through:
+        // a block drawn alone cannot know its pixels, so every frame is drawn whole.
+        let soft = deckcraft_model::Shape {
+            id: ShapeId(20),
+            name: "Soft".into(),
+            xfrm: Some(deckcraft_model::Xfrm::new(300.0, 100.0, 120.0, 80.0)),
+            effects: Some(deckcraft_model::Effects { soft_edge: Some(12.0), ..Default::default() }),
+            ..Default::default()
+        };
+        let (doc, mut tr) = morph_fixture(vec![soft]);
+        let ctx = egui::Context::default();
+        for t in [0.2, 0.3, 0.4] {
+            draw_morph_frame(&ctx, &doc, (0, 1), morph_frame_at(&doc, t), (960, 540), &mut tr);
+            assert_eq!(uploads(&ctx), [(None, [960, 540])], "t = {t}");
+        }
     }
 
     #[test]
