@@ -542,6 +542,9 @@ pub struct SlideApp {
     /// Audio/video playback (editor control bar, slide show, `media.*` commands).
     pub media: media::MediaHost,
     pub status: Option<(String, f64)>,
+    /// A notice that stays while nothing fresher is in `status` (opening a file clears `status`,
+    /// not this): the app runs where Finder can't make it the default app (#1305).
+    standing_status: Option<String>,
     /// A presentation being read in the background, with its progress window ([`opening`]).
     pub opening: Option<opening::Opening>,
     /// A brief notice over the bottom of the window (missing fonts on opening a file).
@@ -816,6 +819,7 @@ impl SlideApp {
             reuse_target: None,
             media: media::MediaHost::new(audio_out),
             status: None,
+            standing_status: None,
             opening: None,
             toast: None,
             fonts_noted: Default::default(),
@@ -886,6 +890,17 @@ impl SlideApp {
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
         self.status = Some((msg.into(), now_ms()));
+    }
+
+    /// Set the notice shown whenever there is no fresh status message (see [`Self::shown_status`]).
+    pub fn set_standing_status(&mut self, msg: impl Into<String>) {
+        self.standing_status = Some(msg.into());
+    }
+
+    /// What the status bar and the start screen show: the fresh status message, or else the
+    /// standing notice.
+    pub fn shown_status(&mut self) -> Option<String> {
+        self.fresh_status().or_else(|| self.standing_status.clone())
     }
 
     /// Turn on the automatic check for a newer release at start-up (desktop shell only; tests and
@@ -5243,6 +5258,19 @@ mod tests {
     /// The status bar's zoom slider has no room for a visible label; it still needs an accessible
     /// name, and adding that name must not change the slider's shared control geometry at either
     /// size.
+    #[test]
+    fn a_standing_notice_survives_opening_a_file_and_yields_to_a_fresh_status() {
+        // #1305: the install-location hint was a status message, which opening the file Finder
+        // launched the app with clears.
+        let mut app = SlideApp::new(Session::with_new(), Services::default());
+        app.set_standing_status("move me to Applications");
+        assert_eq!(app.shown_status().as_deref(), Some("move me to Applications"));
+        app.set_status("Recovered 1 unsaved presentation");
+        assert_eq!(app.shown_status().as_deref(), Some("Recovered 1 unsaved presentation"));
+        app.note_recent("/tmp/talk.pptx");
+        assert_eq!(app.shown_status().as_deref(), Some("move me to Applications"));
+    }
+
     #[test]
     fn status_zoom_slider_is_named_without_growing_the_status_bar() {
         for size in [egui::vec2(900.0, 560.0), egui::vec2(1440.0, 900.0)] {
