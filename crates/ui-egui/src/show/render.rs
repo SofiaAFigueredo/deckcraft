@@ -1,5 +1,8 @@
 use super::zoom::GRID_CAP;
-use super::*;
+use super::{
+    BackKey, Color32, Key, Layer, Mesh, Prefetch, Presentation, Rect, RenderOpts, ShapeId, ShapeState, Show, ShowState, StepStamp, TextureHandle,
+    Timeline, Transition, TriggerPlay, pos2, state_for, vec2,
+};
 
 pub(super) fn render_threads() -> u16 {
     if cfg!(target_arch = "wasm32") { 0 } else { std::thread::available_parallelism().map(|n| n.get().min(8) as u16).unwrap_or(0) }
@@ -48,12 +51,13 @@ pub(super) fn draw_morph_frame(
     match (part, tr.morph.as_mut()) {
         (Some(None), Some(_)) => {}
         (Some(Some(block)), Some(tex)) => {
-            let img = deckcraft_render::render_blend_part(doc, (from, to), m.mix, &m.shapes, &text, &paths, block, &opts);
+            let img =
+                deckcraft_render::render_blend(doc, (from, to), m.mix, &m.shapes, &text, &paths, &deckcraft_render::opts_for_part(&opts, block));
             let ci = crate::textures::to_color_image(&img, false);
             tex.set_partial([block.0 as usize, block.1 as usize], ci, egui::TextureOptions::LINEAR);
         }
         _ => {
-            let img = deckcraft_render::render_blend(doc, from, to, m.mix, &m.shapes, &text, &paths, &opts);
+            let img = deckcraft_render::render_blend(doc, (from, to), m.mix, &m.shapes, &text, &paths, &opts);
             let ci = crate::textures::to_color_image(&img, false);
             match tr.morph.as_mut() {
                 Some(tex) => crate::textures::replace(ctx, tex, ci),

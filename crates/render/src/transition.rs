@@ -5,7 +5,7 @@
 use deckcraft_anim::{Layer, Source, layer_mesh, transition_frame, uses_slide_parts};
 use deckcraft_model::{Presentation, ShapeId};
 
-use crate::{Image, PathMorph, Rect, RenderOpts, Shape, ShapeState, SlidePart, TextMorph, render_blend, render_slide, render_slide_part};
+use crate::{Image, Rect, RenderOpts, ShapeState, SlidePart, render_blend, render_slide, render_slide_part};
 
 /// The two slides of a transition rendered as background and content, for the transitions that
 /// move contents over the backgrounds ([`deckcraft_anim::uses_slide_parts`]). `None` parts of the
@@ -87,7 +87,7 @@ pub fn render_transition(pres: &Presentation, index: usize, t: f64, opts: &Rende
                 .iter()
                 .map(|x| crate::PathMorph { id: x.id, from: x.from.clone(), from_box: x.from_box, to_box: x.to_box, t: m.mix })
                 .collect();
-            return render_blend(pres, from, index, m.mix, &m.shapes, &text, &paths, &o);
+            return render_blend(pres, (from, index), m.mix, &m.shapes, &text, &paths, &o);
         }
     }
     let new = render_slide(pres, index, opts);
@@ -116,20 +116,10 @@ pub fn pixel_region(region: Rect, scale: f64, size: (u32, u32)) -> Option<PixelR
     (x1 > x0 && y1 > y0).then_some((x0, y0, x1 - x0, y1 - y0))
 }
 
-/// [`render_blend`] drawing only the block `part` of the frame (see [`pixel_region`]): the picture
-/// returned is `part`'s size and holds the pixels the whole frame has there.
-pub fn render_blend_part(
-    pres: &Presentation,
-    (old, new): (usize, usize),
-    mix: f64,
-    shapes: &[(Shape, bool)],
-    text: &[TextMorph],
-    paths: &[PathMorph],
-    part: PixelRect,
-    opts: &RenderOpts,
-) -> Image {
-    let o = RenderOpts { offset: (opts.offset.0 - part.0 as f64, opts.offset.1 - part.1 as f64), size: Some((part.2, part.3)), ..copy_opts(opts) };
-    render_blend(pres, old, new, mix, shapes, text, paths, &o)
+/// `opts` for drawing only the block `part` of a frame (see [`pixel_region`]): a render with them
+/// returns a picture of `part`'s size that holds the pixels the whole frame has there.
+pub fn opts_for_part<'a>(opts: &RenderOpts<'a>, part: PixelRect) -> RenderOpts<'a> {
+    RenderOpts { offset: (opts.offset.0 - part.0 as f64, opts.offset.1 - part.1 as f64), size: Some((part.2, part.3)), ..copy_opts(opts) }
 }
 
 pub(crate) fn copy_opts<'a>(o: &RenderOpts<'a>) -> RenderOpts<'a> {
